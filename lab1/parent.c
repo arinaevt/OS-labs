@@ -84,10 +84,11 @@ int main(int argc, char *argv[]){
         char *const args[] = {SERVER_PROGRAM_NAME, argv[1], NULL};
 
         int32_t status = execv(path, args);
-
-        const char msg[] = "error: failed to exec child program\n";
-        write(STDERR_FILENO, msg, sizeof(msg) - 1);
-        exit(EXIT_FAILURE);
+        if(status == -1){
+            const char msg[] = "error: failed to exec child program\n";
+            write(STDERR_FILENO, msg, sizeof(msg) - 1);
+            exit(EXIT_FAILURE);
+        }
     } break;
     
     default: {
