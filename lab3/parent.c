@@ -7,7 +7,7 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 
-static char CHILD_NAME[] = "child"; /дочерний
+static char CHILD_NAME[] = "child";
 
 int main(int argc, char *argv[]){
     if(argc == 1){
