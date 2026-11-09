@@ -7,7 +7,9 @@
 #include <sys/mman.h>
 #include <stdbool.h>
 #include <ctype.h>
-
+void dhf(){
+    
+}
 static bool is_prime(int n){
     if (n < 2){
         return false;
