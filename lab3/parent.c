@@ -6,6 +6,10 @@
 #include <string.h>
 #include <fcntl.h>
 #include <sys/mman.h>
+#include <semaphore.h>
+#include <stdbool.h>
+
+#define SHM_SIZE 4096
 
 static char CHILD_NAME[] = "child";
 
@@ -33,41 +37,50 @@ int main(int argc, char *argv[]){
         prograth[len] = '\0';
     }
 
-    char tmpfile[] = "/tmp/lab3XXXXXX";
-    int fd = mkstemp(tmpfile);
-    if(fd == -1){
-        const char msg[] = "error: failed to create temporary file\n";
+    char shm_name[32];
+    char sem_name[32];
+
+    snprintf(shm_name, sizeof(shm_name), "/shm%d", getpid());
+    snprintf(sem_name, sizeof(sem_name), "/sem%d", getpid());
+
+    int shm = shm_open(shm_name, O_CREAT | O_RDWR | O_TRUNC, 0600);
+    if(shm == -1){
+        const char msg[] = "error: failed to open SHM\n";
         write(STDERR_FILENO, msg, sizeof(msg) - 1);
+        _exit(EXIT_FAILURE);
+    }
+
+    if(ftruncate(shm, SHM_SIZE) == -1){
+        const char msg[] = "error: failed to resize SHM\n";
+        write(STDERR_FILENO, msg, sizeof(msg) - 1);
+        close(shm);
+        shm_unlink(shm_name);
         exit(EXIT_FAILURE);
     }
 
-    const size_t MAP_SIZE = 4096;
-    if(ftruncate(fd, MAP_SIZE) == -1){
-        const char msg[] = "error: failed to ftruncate\n";
+    char *shm_buf = mmap(NULL, SHM_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, shm, 0);
+    if(shm_buf == MAP_FAILED){
+        const char msg[] = "error: failed to map SHM\n";
         write(STDERR_FILENO, msg, sizeof(msg) - 1);
-        close(fd);
-        unlink(tmpfile);
-        exit(EXIT_FAILURE);
-    }
-    
-    char *shared = mmap(NULL, MAP_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-    if(shared == MAP_FAILED){
-        const char msg[] = "error: mmap failed\n";
-        write(STDERR_FILENO, msg, sizeof(msg) - 1);
-        close(fd);
-        unlink(tmpfile);
-        exit(EXIT_FAILURE);
+        _exit(EXIT_FAILURE);
     }
 
-    memset(shared, 0, MAP_SIZE);
+    sem_t *sem = sem_open(sem_name, O_CREAT | O_RDWR, 0600, 1);
+    if(sem == SEM_FAILED){
+        const char msg[] = "error: failed to open semaphore\n";
+        write(STDERR_FILENO, msg, sizeof(msg) - 1);
+        _exit(EXIT_FAILURE);
+    }
 
     int file = open(argv[1], O_RDONLY);
     if(file < 0){
         const char msg[] = "error: failed to open file\n";
         write(STDERR_FILENO, msg, sizeof(msg) - 1);
-        munmap(shared, MAP_SIZE);
-        close(fd);
-        unlink(tmpfile);
+        sem_close(sem);
+        munmap(shm_buf, SHM_SIZE);
+        sem_unlink(sem_name);
+        shm_unlink(shm_name);
+        close(shm);
         exit(EXIT_FAILURE);
     }
 
@@ -78,9 +91,10 @@ int main(int argc, char *argv[]){
         const char msg[] = "error: failed to spawn new process\n";
         write(STDERR_FILENO, msg, sizeof(msg) - 1);
         close(file);
-        munmap(shared, MAP_SIZE);
-        close(fd);
-        unlink(tmpfile);
+        munmap(shm_buf, SHM_SIZE);
+        close(shm);
+        sem_unlink(sem_name);
+        shm_unlink(shm_name);
         exit(EXIT_FAILURE);
     } break;
     
@@ -88,48 +102,47 @@ int main(int argc, char *argv[]){
         if(dup2(file, STDIN_FILENO) < 0){
             const char msg[] = "error: dup2 stdin failed\n";
             write(STDERR_FILENO, msg, sizeof(msg) - 1);
-            exit(EXIT_FAILURE);
+            _exit(EXIT_FAILURE);
         }
         close(file);
 
         char path[2048];
         snprintf(path, sizeof(path) - 1, "%s/%s", prograth, CHILD_NAME);
-        char *const args[] = {CHILD_NAME, tmpfile, NULL};
+        char *args[] = {CHILD_NAME, shm_name, sem_name, NULL};
 
         execv(path, args);
 
         const char msg[] = "error: failed to exec child program\n";
         write(STDERR_FILENO, msg, sizeof(msg) - 1);
-        exit(EXIT_FAILURE);
+        _exit(EXIT_FAILURE);
     } break;
     
     default: {
-        
         close(file);
-        close(fd);
+        close(shm);
 
         const char header[] = "Составные числа из файла:\n";
         write(STDOUT_FILENO, header, sizeof(header) - 1);
 
+        bool running = true;
+        while(running){
+            sem_wait(sem);
 
+            uint32_t *length = (uint32_t *)shm_buf;
+            char *text = shm_buf + sizeof(uint32_t);
+
+            if(*length == UINT32_MAX){
+                running = false;
+            } else if(*length > 0){
+                write(STDOUT_FILENO, text, *length);
+                *length = 0;
+            }
+
+            sem_post(sem);
+        }
 
         int status;
         waitpid(child, &status, 0);
-
-        size_t pos = 0;
-        while(pos < MAP_SIZE && shared[pos] != '\0'){
-            size_t start = pos;
-            while(pos < MAP_SIZE && shared[pos] != '\n' && shared[pos] != '\0'){
-                pos++;
-            }
-            if(pos > start){
-                write(STDOUT_FILENO, shared + start, pos - start);
-                write(STDOUT_FILENO, "\n", 1);
-            }
-            if(pos < MAP_SIZE && shared[pos] == '\n'){
-                pos++;
-            }
-        }
 
         if(WIFEXITED(status)){
             int code = WEXITSTATUS(status);
@@ -148,11 +161,12 @@ int main(int argc, char *argv[]){
         const char msg[] = "Parent process is ended\n";
         write(STDOUT_FILENO, msg, sizeof(msg) - 1);
 
-        munmap(shared, MAP_SIZE);
-        unlink(tmpfile);
+        sem_close(sem);
+        munmap(shm_buf, SHM_SIZE);
+        sem_unlink(sem_name);
+        shm_unlink(shm_name);
     } break;
     }
 
     return 0;
-
 }
